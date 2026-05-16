@@ -143,7 +143,7 @@ def evaluate_track_based(embeddings_np, genre_matrix_np, k=10):
     }
 
 # user-to-track оценка
-# В user_liked_lists добавлен столбец 'vector' с уже обработанным эмбеддингом пользователя
+# В user_liked_lists добавлен столбец 'vector' с уже обработанным эмбеддингом пользователя, это тензор размера (1, n), где n - количество признаков в эмбэддинге
 def evaluate_user_based(user_liked_lists, embeddings_np, genre_matrix_np, k=10):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -218,3 +218,4 @@ def evaluate_user_based(user_liked_lists, embeddings_np, genre_matrix_np, k=10):
         "Coverage": len(all_recommended) / n_tracks,
         "Mean Diversity": np.mean(diversity_scores),
     }
+# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
