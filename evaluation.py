@@ -1,5 +1,18 @@
+import torch
+import tqdm
+import json
 import numpy as np
+import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
+
+X_train = pd.read_pickle("X_train.pkl")
+X_val = pd.read_pickle("X_train.pkl")
+X_test = pd.read_pickle("X_test.pkl")
+
+all_tracks = pd.concat([X_train, X_val, X_test])
+
+id_to_pos = {track_id: pos for pos, track_id in enumerate(all_tracks.index)}
+pos_to_id = {pos: track_id for track_id, pos in id_to_pos.items()}
 
 # AP@N
 def average_precision(rels, m, N):
