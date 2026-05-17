@@ -6,7 +6,7 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 X_train = pd.read_pickle("X_train.pkl")
-X_val = pd.read_pickle("X_train.pkl")
+X_val = pd.read_pickle("X_val.pkl")
 X_test = pd.read_pickle("X_test.pkl")
 
 all_tracks = pd.concat([X_train, X_val, X_test])
