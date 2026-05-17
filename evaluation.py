@@ -218,4 +218,33 @@ def evaluate_user_based(user_liked_lists, embeddings_np, genre_matrix_np, k=10):
         "Coverage": len(all_recommended) / n_tracks,
         "Mean Diversity": np.mean(diversity_scores),
     }
+# Глобальный словарь для хранения всех результатов
+ALL_METRICS = {}
+
+def add_model_metrics(model_name, metrics_dict, filename='all_model_metrics.json'):
+    """
+    Добавляет метрики модели в глобальный словарь и сохраняет в JSON файл.
+    
+    model_name: str - имя модели (ключ в словаре)
+    metrics_dict: dict - словарь с метриками (например, {'MAP': 0.5, 'Recall': 0.6})
+    filename: str - имя файла для сохранения
+    """
+    global ALL_METRICS
+    
+    # Добавляем в глобальный словарь
+    ALL_METRICS[model_name] = metrics_dict
+    
+    # Сохраняем в файл (перезаписываем файл актуальным состоянием словаря)
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(ALL_METRICS, f, indent=4, ensure_ascii=False)
+        
+    print(f"Метрики для '{model_name}' добавлены и сохранены в {filename}")
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Объединим их в один словарь для удобства (или можно сохранять по отдельности)
+#    combined_metrics = {
+#        "User_to_Track": metrics_user,
+#        "Track_to_Track": metrics_track
+#    }
+# # !!! ВОТ ЭТА СТРОКА ДОБАВЛЯЕТ РЕЗУЛЬТАТ В ОБЩИЙ СЛОВАРЬ !!!
+# add_model_metrics(model_name, combined_metrics)
+
