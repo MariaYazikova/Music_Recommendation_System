@@ -5,11 +5,11 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
-# X_train = pd.read_pickle("X_train.pkl")
-# X_val = pd.read_pickle("X_val.pkl")
-# X_test = pd.read_pickle("X_test.pkl")
+X_train = pd.read_pickle("X_train.pkl")
+X_val = pd.read_pickle("X_val.pkl")
+X_test = pd.read_pickle("X_test.pkl")
 
-# all_tracks = pd.concat([X_train, X_val, X_test])
+all_tracks = pd.concat([X_train, X_val, X_test])
 
 id_to_pos = {track_id: pos for pos, track_id in enumerate(all_tracks.index)}
 pos_to_id = {pos: track_id for track_id, pos in id_to_pos.items()}
@@ -285,9 +285,4 @@ def add_model_metrics(model_name, metrics_dict, filename='all_model_metrics.json
 #    }
 # # !!! ВОТ ЭТА СТРОКА ДОБАВЛЯЕТ РЕЗУЛЬТАТ В ОБЩИЙ СЛОВАРЬ !!!
 # add_model_metrics(model_name, combined_metrics)
-# all_tracks_url = '/kaggle/input/datasets/daryashabarkina/graph-data/all_tracks.pkl'
-# with open (all_tracks_url, 'rb') as a:
-#    all_tracks = pickle.load(a) 
-# test_df_url = '/kaggle/input/datasets/daryashabarkina/dataset/X_test.pkl'
-# with open (test_df_url, 'rb') as b:
-#    test_df = pickle.load(b) 
+
