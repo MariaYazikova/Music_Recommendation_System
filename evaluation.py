@@ -5,11 +5,11 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
-X_train = pd.read_pickle("X_train.pkl")
-X_val = pd.read_pickle("X_val.pkl")
-X_test = pd.read_pickle("X_test.pkl")
+# X_train = pd.read_pickle("X_train.pkl")
+# X_val = pd.read_pickle("X_val.pkl")
+# X_test = pd.read_pickle("X_test.pkl")
 
-all_tracks = pd.concat([X_train, X_val, X_test])
+# all_tracks = pd.concat([X_train, X_val, X_test])
 
 id_to_pos = {track_id: pos for pos, track_id in enumerate(all_tracks.index)}
 pos_to_id = {pos: track_id for track_id, pos in id_to_pos.items()}
@@ -87,21 +87,25 @@ def diversity(embeddings):
     return 1 - ils
 
 # track-to-track оценка
-def evaluate_track_based(embeddings_np, genre_matrix_np, k=10):
+def evaluate_track_based(embeddings_np, test_embeddings_np, genre_matrix_np, k=10):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     embeddings = torch.from_numpy(embeddings_np).float().to(device)      # (N, 32)
+    test_embeddings = torch.from_numpy(test_embeddings_np).float().to(device)
     genres = torch.from_numpy(genre_matrix_np).float().to(device)        # (N, M)
 
-    APs, ARs, MRRs = [], [], []
-    diversity_scores = []
+    AP10, AR10, MRR10 = [], [], []
+    AP50, AR50, MRR50 = [], [], []
+    diversity_scores10 = []
+    diversity_scores50 = []
     all_recommended = set()
 
     n_tracks = embeddings.shape[0]
+    n_test_tracks = test_embeddings.shape[0]
 
-    for i in tqdm.tqdm(range(n_tracks)):
+    for i in tqdm.tqdm(range(n_test_tracks)):
         # 1. Берем вектор текущего трека
-        track_vec = embeddings[i].unsqueeze(0) # (1, 32)
+        track_vec = test_embeddings[i].unsqueeze(0) # (1, 32)
         
         # 2. Считаем сходство со всеми треками сразу (Dot Product == Cosine Sim для нормализованных векторов)
         sims = torch.mm(track_vec, embeddings.T)[0] # (N,)
@@ -135,24 +139,34 @@ def evaluate_track_based(embeddings_np, genre_matrix_np, k=10):
         
         # m = количество таких треков
         m = is_relevant_global.sum().item()
+        
+        rec_embs_cpu = embeddings[recommended_positions].cpu().numpy()
 
-        APs.append(average_precision(rels, m, k))
-        ARs.append(average_recall(rels, m, k))
-        MRRs.append(reciprocal_rank(rels))
+        AP50.append(average_precision(rels, m, 50))
+        AR50.append(average_recall(rels, m, 50))
+        MRR50.append(reciprocal_rank(rels))
+        diversity_scores50.append(diversity(rec_embs_cpu))
+
+        AP10.append(average_precision(rels[:10], m, 10))
+        AR10.append(average_recall(rels[:10], m, 10))
+        MRR10.append(reciprocal_rank(rels[:10]))
+        diversity_scores10.append(diversity(rec_embs_cpu[:10]))
 
         # ИСПРАВЛЕНИЕ: Превращаем позиции обратно в ID треков
         recommended_ids = [pos_to_id[pos] for pos in recommended_positions]
         
         all_recommended.update(recommended_ids)
-        rec_embs_cpu = embeddings[recommended_positions].cpu().numpy()
-        diversity_scores.append(diversity(rec_embs_cpu))
 
     return {
-        "MAP@N": np.mean(APs),
-        "MAR@N": np.mean(ARs),
-        "MRR": np.mean(MRRs),
-        "Coverage": len(all_recommended) / n_tracks,
-        "Mean Diversity": np.mean(diversity_scores),
+        "MAP@50": float(np.mean(AP50)),
+        "MAP@10": float(np.mean(AP10)),
+        "MAR@50": float(np.mean(AR50)),
+        "MAR@10": float(np.mean(AR10)),
+        "MRR50": float(np.mean(MRR50)),
+        "MRR10": float(np.mean(MRR10)),
+        "Coverage": float(len(all_recommended) / n_tracks),
+        "Mean Diversity 50": float(np.mean(diversity_scores50)),
+        "Mean Diversity 10": float(np.mean(diversity_scores10))
     }
 
 # user-to-track оценка
@@ -160,8 +174,10 @@ def evaluate_track_based(embeddings_np, genre_matrix_np, k=10):
 def evaluate_user_based(user_liked_lists, embeddings_np, genre_matrix_np, k=10):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    APs, ARs, MRRs = [], [], []
-    diversity_scores = []
+    AP10, AR10, MRR10 = [], [], []
+    AP50, AR50, MRR50 = [], [], []
+    diversity_scores10 = []
+    diversity_scores50 = []
     all_recommended = set()
 
     # 1. Переносим все данные на GPU один раз
@@ -212,24 +228,33 @@ def evaluate_user_based(user_liked_lists, embeddings_np, genre_matrix_np, k=10):
         # m = количество таких треков
         m = is_relevant_global.sum().item()
 
-        APs.append(average_precision(rels, m, k))
-        ARs.append(average_recall(rels, m, k))
-        MRRs.append(reciprocal_rank(rels))
+        rec_embs_cpu = embeddings[recommended_positions].cpu().numpy()
+
+        AP50.append(average_precision(rels, m, 50))
+        AR50.append(average_recall(rels, m, 50))
+        MRR50.append(reciprocal_rank(rels))
+        diversity_scores50.append(diversity(rec_embs_cpu))
+
+        AP10.append(average_precision(rels[:10], m, 10))
+        AR10.append(average_recall(rels[:10], m, 10))
+        MRR10.append(reciprocal_rank(rels[:10]))
+        diversity_scores10.append(diversity(rec_embs_cpu[:10]))
 
         # ИСПРАВЛЕНИЕ: Превращаем позиции обратно в ID треков
         recommended_ids = [pos_to_id[pos] for pos in recommended_positions]
         
-        # Добавляем эти ID в общее множествоA
         all_recommended.update(recommended_ids)
-        rec_embs_cpu = embeddings[recommended_positions].cpu().numpy()
-        diversity_scores.append(diversity(rec_embs_cpu))
 
     return {
-        "MAP@N": np.mean(APs),
-        "MAR@N": np.mean(ARs),
-        "MRR": np.mean(MRRs),
-        "Coverage": len(all_recommended) / n_tracks,
-        "Mean Diversity": np.mean(diversity_scores),
+        "MAP@50": float(np.mean(AP50)),
+        "MAP@10": float(np.mean(AP10)),
+        "MAR@50": float(np.mean(AR50)),
+        "MAR@10": float(np.mean(AR10)),
+        "MRR50": float(np.mean(MRR50)),
+        "MRR10": float(np.mean(MRR10)),
+        "Coverage": float(len(all_recommended) / n_tracks),
+        "Mean Diversity 50": float(np.mean(diversity_scores50)),
+        "Mean Diversity 10": float(np.mean(diversity_scores10))
     }
 # Глобальный словарь для хранения всех результатов
 ALL_METRICS = {}
@@ -260,4 +285,9 @@ def add_model_metrics(model_name, metrics_dict, filename='all_model_metrics.json
 #    }
 # # !!! ВОТ ЭТА СТРОКА ДОБАВЛЯЕТ РЕЗУЛЬТАТ В ОБЩИЙ СЛОВАРЬ !!!
 # add_model_metrics(model_name, combined_metrics)
-
+# all_tracks_url = '/kaggle/input/datasets/daryashabarkina/graph-data/all_tracks.pkl'
+# with open (all_tracks_url, 'rb') as a:
+#    all_tracks = pickle.load(a) 
+# test_df_url = '/kaggle/input/datasets/daryashabarkina/dataset/X_test.pkl'
+# with open (test_df_url, 'rb') as b:
+#    test_df = pickle.load(b) 
