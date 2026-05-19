@@ -185,10 +185,15 @@ def evaluate_user_based(user_liked_lists, embeddings_np, genre_matrix_np, k=10):
     genres = torch.from_numpy(genre_matrix_np).float().to(device)        # (N, M)
 
     n_tracks = embeddings.shape[0]
+    inference_times = []
 
     for user in tqdm.tqdm(user_liked_lists):
         user_emb = user['vector']
         # --- ШАГ 4: Поиск рекомендаций (User Embedding vs All Tracks) ---
+        # Синхронизируем CUDA перед стартом, чтобы убедиться, что предыдущие операции завершены
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        start_time = time.time()
         sims = torch.mm(user_emb, embeddings.T)[0] # (N,)
 
         favorite_poses = [id_to_pos[track_id] for track_id in user['liked_tracks']]
@@ -202,6 +207,14 @@ def evaluate_user_based(user_liked_lists, embeddings_np, genre_matrix_np, k=10):
 
         # Берем топ-K рекомендаций
         rec_vals, rec_poses = torch.topk(masked_sims, k=k) # (K,)
+        # Синхронизируем CUDA после завершения всех вычислений
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+            
+        end_time = time.time()
+        
+        # Записываем время
+        inference_times.append(end_time - start_time)
         recommended_positions = rec_poses.cpu().numpy()    # Переносим на CPU для дальнейшей работы с pandas/sets
 
         # A. Релевантность рекомендаций (rels)
@@ -254,7 +267,8 @@ def evaluate_user_based(user_liked_lists, embeddings_np, genre_matrix_np, k=10):
         "MRR10": float(np.mean(MRR10)),
         "Coverage": float(len(all_recommended) / n_tracks),
         "Mean Diversity 50": float(np.mean(diversity_scores50)),
-        "Mean Diversity 10": float(np.mean(diversity_scores10))
+        "Mean Diversity 10": float(np.mean(diversity_scores10)),
+        "Mean inference time": float(np.mean(inference_times))
     }
 # Глобальный словарь для хранения всех результатов
 ALL_METRICS = {}
