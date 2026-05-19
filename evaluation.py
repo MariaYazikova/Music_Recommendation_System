@@ -3,6 +3,7 @@ import tqdm
 import json
 import numpy as np
 import pandas as pd
+import time
 from sklearn.metrics.pairwise import cosine_similarity
 
 X_train = pd.read_pickle("X_train.pkl")
