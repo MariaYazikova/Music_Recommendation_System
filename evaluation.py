@@ -133,7 +133,7 @@ def evaluate_track_based_cosine(embeddings_np, test_embeddings_np, genre_matrix_
         rec_genres = genres[rec_pos]
         liked_genres = genres[i].unsqueeze(0)
 
-        rels = (rec_genres * liked_genres.unsqueeze(0)).any(dim=1).int().cpu().numpy()
+        rels = (rec_genres * liked_genres.unsqueeze(0)).any(dim=1).int().cpu().numpy().astype(int).tolist()
 
         overlaps = torch.mm(genres, liked_genres.T)
         m = (overlaps > 0).sum().item()
@@ -204,7 +204,7 @@ def evaluate_track_based_knn(embeddings_np, test_embeddings_np, genre_matrix_np,
         rec_genres = genres[rec_pos]
         liked_genres = genres[i]
 
-        rels = (rec_genres * liked_genres.unsqueeze(0)).any(dim=1).int().cpu().numpy()
+        rels = (rec_genres * liked_genres.unsqueeze(0)).any(dim=1).int().cpu().numpy().astype(int).tolist()
 
         m = ((genres * liked_genres).sum(dim=1) > 0).sum().item()
 
