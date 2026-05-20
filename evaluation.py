@@ -4,7 +4,15 @@ import json
 import numpy as np
 import pandas as pd
 import time
+import pickle
+
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.neighbors import NearestNeighbors
+
+
+# =========================
+# DATA
+# =========================
 
 X_train = pd.read_pickle("X_train.pkl")
 X_val = pd.read_pickle("X_val.pkl")
@@ -15,30 +23,43 @@ all_tracks = pd.concat([X_train, X_val, X_test])
 id_to_pos = {track_id: pos for pos, track_id in enumerate(all_tracks.index)}
 pos_to_id = {pos: track_id for track_id, pos in id_to_pos.items()}
 
-# AP@N
+
+# =========================
+# LOAD KNN CONFIGS
+# =========================
+
+def load_knn_config(model_type="audio"):
+    if model_type == "audio":
+        cfg_path = "best_knn_audio_config.pkl"
+    else:
+        cfg_path = "best_knn_hybrid_config.pkl"
+
+    with open(cfg_path, "rb") as f:
+        config = pickle.load(f)
+
+    return config
+
+
+# =========================
+# METRICS
+# =========================
+
 def average_precision(rels, m, N):
-    # m - кол-во релевантных треков для данного объекта во всем датасете 
-    # N - кол-во рекомендаций (top-N)
     if m == 0:
         return 0
-    
-    # hits - сколько релевантных треков найдено до позиции k
+
     hits = 0
-    # ap_sum - сумма Presision для релевантных треков
     ap_sum = 0
 
     for k, r in enumerate(rels, 1):
-
         if r:
             hits += 1
-            p_k = hits / k
-            ap_sum += p_k
+            ap_sum += hits / k
 
     return ap_sum / min(m, N)
 
-# AR@N
-def average_recall(rels, m, N):
 
+def average_recall(rels, m, N):
     if m == 0:
         return 0
 
@@ -46,37 +67,28 @@ def average_recall(rels, m, N):
     ar_sum = 0
 
     for k, r in enumerate(rels, 1):
-
         if r:
             hits += 1
-            r_k = hits / m
-            ar_sum += r_k
-            
+            ar_sum += hits / m
+
     return ar_sum / min(m, N)
 
-# RR
-def reciprocal_rank(rels):
 
+def reciprocal_rank(rels):
     for i, r in enumerate(rels, 1):
-        # i - позиция первого релевантного результата
         if r:
             return 1 / i
-
     return 0
 
-# Diversity
-def diversity(embeddings):
 
+def diversity(embeddings):
     k = len(embeddings)
     if k < 2:
         return 0
 
-    # матрица сходства между всеми парами элементов
     sim = cosine_similarity(embeddings)
 
-    # total - сумма попарных сходств между всеми элементами
     total = 0
-    # count - кол-во всех уникальных пар (=K(K-1)/2)
     count = 0
 
     for i in range(k):
@@ -84,220 +96,318 @@ def diversity(embeddings):
             total += sim[i][j]
             count += 1
 
-    ils = total / count
-    return 1 - ils
+    return 1 - total / count
 
-# track-to-track оценка
-def evaluate_track_based(embeddings_np, test_embeddings_np, genre_matrix_np, k=10):
+
+# =========================
+# TRACK-TO-TRACK (COSINE)
+# =========================
+
+def evaluate_track_based_cosine(embeddings_np, test_embeddings_np, genre_matrix_np, k=10):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    embeddings = torch.from_numpy(embeddings_np).float().to(device)      # (N, 32)
+    embeddings = torch.from_numpy(embeddings_np).float().to(device)
     test_embeddings = torch.from_numpy(test_embeddings_np).float().to(device)
-    genres = torch.from_numpy(genre_matrix_np).float().to(device)        # (N, M)
+    genres = torch.from_numpy(genre_matrix_np).float().to(device)
 
     AP10, AR10, MRR10 = [], [], []
     AP50, AR50, MRR50 = [], [], []
-    diversity_scores10 = []
-    diversity_scores50 = []
+    div10, div50 = [], []
+
     all_recommended = set()
 
     n_tracks = embeddings.shape[0]
-    n_test_tracks = test_embeddings.shape[0]
 
-    for i in tqdm.tqdm(range(n_test_tracks)):
-        # 1. Берем вектор текущего трека
-        track_vec = test_embeddings[i].unsqueeze(0) # (1, 32)
-        
-        # 2. Считаем сходство со всеми треками сразу (Dot Product == Cosine Sim для нормализованных векторов)
-        sims = torch.mm(track_vec, embeddings.T)[0] # (N,)
+    for i in tqdm.tqdm(range(len(test_embeddings))):
 
-        # Маскируем лайкнутые треки (ставим им очень низкий скор, чтобы они не попали в топ)
-        mask = torch.ones(n_tracks, device=device)
-        mask[i] = -1e9 
-        masked_sims = sims + mask
+        sims = torch.mm(test_embeddings[i].unsqueeze(0), embeddings.T)[0]
 
-        # 4. Берем топ-K рекомендаций
-        rec_vals, rec_poses = torch.topk(masked_sims, k=k) # (K,)
-        recommended_positions = rec_poses.cpu().numpy()
+        mask = torch.zeros(n_tracks, device=device)
+        mask[i] = -1e9
+        sims = sims + mask
 
-        # A. Релевантность рекомендаций (rels)
-        rec_genres = genres[rec_poses]             # (K, M)
-        liked_genres = genres[i].unsqueeze(0)       # (1, M) - жанры исходного трека
-        
-        # Проверяем пересечение жанров у рекомендованных треков с маской пользователя
-        # (K, M) * (1, M) -> (K, M). any(dim=1) -> (K,) boolean
-        relevances_bool = (rec_genres * liked_genres.unsqueeze(0)).any(dim=1)
-        rels = relevances_bool.int().cpu().numpy()[0] # (K,) array of 0/1
-        
-        # B. Расчет m (сколько всего треков в базе релевантны пользователю?)
-        # Вместо цикла for j in range(n_tracks):
-        # Мы умножаем матрицу всех жанров (N, M) на вектор маски (M, 1)
-        # Результат (N, 1): для каждого трека сумма общих жанров с пользователем
-        overlaps_all = torch.mm(genres, liked_genres.T)
-        
-        # Трек релевантен, если overlap > 0
-        is_relevant_global = (overlaps_all > 0).squeeze(1) # (N,) boolean
-        
-        # m = количество таких треков
-        m = is_relevant_global.sum().item()
-        
-        rec_embs_cpu = embeddings[recommended_positions].cpu().numpy()
+        rec_vals, rec_pos = torch.topk(sims, k=k)
 
-        AP50.append(average_precision(rels, m, 50))
-        AR50.append(average_recall(rels, m, 50))
-        MRR50.append(reciprocal_rank(rels))
-        diversity_scores50.append(diversity(rec_embs_cpu))
+        rec_pos_np = rec_pos.cpu().numpy()
+
+        rec_genres = genres[rec_pos]
+        liked_genres = genres[i].unsqueeze(0)
+
+        rels = (rec_genres * liked_genres.unsqueeze(0)).any(dim=1).int().cpu().numpy()
+
+        overlaps = torch.mm(genres, liked_genres.T)
+        m = (overlaps > 0).sum().item()
+
+        rec_embs = embeddings_np[rec_pos_np]
 
         AP10.append(average_precision(rels[:10], m, 10))
         AR10.append(average_recall(rels[:10], m, 10))
         MRR10.append(reciprocal_rank(rels[:10]))
-        diversity_scores10.append(diversity(rec_embs_cpu[:10]))
 
-        # ИСПРАВЛЕНИЕ: Превращаем позиции обратно в ID треков
-        recommended_ids = [pos_to_id[pos] for pos in recommended_positions]
-        
-        all_recommended.update(recommended_ids)
+        AP50.append(average_precision(rels, m, 50))
+        AR50.append(average_recall(rels, m, 50))
+        MRR50.append(reciprocal_rank(rels))
+
+        div10.append(diversity(rec_embs[:10]))
+        div50.append(diversity(rec_embs))
+
+        all_recommended.update(rec_pos_np)
 
     return {
-        "MAP@50": float(np.mean(AP50)),
         "MAP@10": float(np.mean(AP10)),
-        "MAR@50": float(np.mean(AR50)),
+        "MAP@50": float(np.mean(AP50)),
         "MAR@10": float(np.mean(AR10)),
-        "MRR50": float(np.mean(MRR50)),
-        "MRR10": float(np.mean(MRR10)),
+        "MAR@50": float(np.mean(AR50)),
+        "MRR@10": float(np.mean(MRR10)),
+        "MRR@50": float(np.mean(MRR50)),
         "Coverage": float(len(all_recommended) / n_tracks),
-        "Mean Diversity 50": float(np.mean(diversity_scores50)),
-        "Mean Diversity 10": float(np.mean(diversity_scores10))
+        "Diversity@10": float(np.mean(div10)),
+        "Diversity@50": float(np.mean(div50)),
     }
 
-# user-to-track оценка
-# В user_liked_lists добавлен столбец 'vector' с уже обработанным эмбеддингом пользователя, это тензор размера (1, n), где n - количество признаков в эмбэддинге
-def evaluate_user_based(user_liked_lists, embeddings_np, genre_matrix_np, k=10):
+
+# =========================
+# TRACK-TO-TRACK (KNN)
+# =========================
+
+def evaluate_track_based_knn(embeddings_np, test_embeddings_np, genre_matrix_np, k=10, model_type="audio"):
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    config = load_knn_config(model_type)
+
+
+    knn = NearestNeighbors(
+        n_neighbors=k,
+        metric=config.get("metric", "cosine"),
+        algorithm=config.get("algorithm", "auto")
+    )
+
+    knn.fit(embeddings_np)
+
+    genres = torch.from_numpy(genre_matrix_np).float().to(device)
 
     AP10, AR10, MRR10 = [], [], []
     AP50, AR50, MRR50 = [], [], []
-    diversity_scores10 = []
-    diversity_scores50 = []
+    div10, div50 = [], []
+
     all_recommended = set()
 
-    # 1. Переносим все данные на GPU один раз
-    embeddings = torch.from_numpy(embeddings_np).float().to(device)      # (N, 32)
-    genres = torch.from_numpy(genre_matrix_np).float().to(device)        # (N, M)
+    n_tracks = embeddings_np.shape[0]
+
+    for i in tqdm.tqdm(range(len(test_embeddings_np))):
+
+        dist, idx = knn.kneighbors(test_embeddings_np[i].reshape(1, -1), n_neighbors=k)
+
+        rec_pos = idx[0]
+
+        rec_genres = genres[rec_pos]
+        liked_genres = genres[i]
+
+        rels = (rec_genres * liked_genres.unsqueeze(0)).any(dim=1).int().cpu().numpy()
+
+        m = ((genres * liked_genres).sum(dim=1) > 0).sum().item()
+
+        rec_embs = embeddings_np[rec_pos]
+
+        AP10.append(average_precision(rels[:10], m, 10))
+        AR10.append(average_recall(rels[:10], m, 10))
+        MRR10.append(reciprocal_rank(rels[:10]))
+
+        AP50.append(average_precision(rels, m, 50))
+        AR50.append(average_recall(rels, m, 50))
+        MRR50.append(reciprocal_rank(rels))
+
+        div10.append(diversity(rec_embs[:10]))
+        div50.append(diversity(rec_embs))
+
+        all_recommended.update(rec_pos)
+
+    return {
+        "MAP@10": float(np.mean(AP10)),
+        "MAP@50": float(np.mean(AP50)),
+        "MAR@10": float(np.mean(AR10)),
+        "MAR@50": float(np.mean(AR50)),
+        "MRR@10": float(np.mean(MRR10)),
+        "MRR@50": float(np.mean(MRR50)),
+        "Coverage": float(len(all_recommended) / n_tracks),
+        "Diversity@10": float(np.mean(div10)),
+        "Diversity@50": float(np.mean(div50)),
+    }
+
+
+# =========================
+# USER-TO-TRACK (COSINE)
+# =========================
+
+def evaluate_user_based_cosine(user_liked_lists, embeddings_np, genre_matrix_np, k=10):
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    embeddings = torch.from_numpy(embeddings_np).float().to(device)
+    genres = torch.from_numpy(genre_matrix_np).float().to(device)
+
+    AP10, AR10, MRR10 = [], [], []
+    AP50, AR50, MRR50 = [], [], []
+    div10, div50 = [], []
+
+    all_recommended = set()
 
     n_tracks = embeddings.shape[0]
+
+    for user in tqdm.tqdm(user_liked_lists):
+
+        user_emb = user["vector"]
+
+        sims = torch.mm(user_emb, embeddings.T)[0]
+
+        liked_pos = torch.tensor(
+            [id_to_pos[x] for x in user["liked_tracks"]],
+            device=device
+        )
+
+        mask = torch.zeros(n_tracks, device=device)
+        mask[liked_pos] = -1e9
+        sims = sims + mask
+
+        rec_vals, rec_pos = torch.topk(sims, k=k)
+
+        rec_pos_np = rec_pos.cpu().numpy()
+
+        rec_genres = genres[rec_pos]
+        liked_genres = genres[liked_pos]
+
+        user_genre_mask = liked_genres.any(dim=0)
+
+        rels = (rec_genres * user_genre_mask.unsqueeze(0)).any(dim=1).int().cpu().numpy()
+
+        m = ((genres * user_genre_mask).sum(dim=1) > 0).sum().item()
+
+        rec_embs = embeddings_np[rec_pos_np]
+
+        AP10.append(average_precision(rels[:10], m, 10))
+        AR10.append(average_recall(rels[:10], m, 10))
+        MRR10.append(reciprocal_rank(rels[:10]))
+
+        AP50.append(average_precision(rels, m, 50))
+        AR50.append(average_recall(rels, m, 50))
+        MRR50.append(reciprocal_rank(rels))
+
+        div10.append(diversity(rec_embs[:10]))
+        div50.append(diversity(rec_embs))
+
+        all_recommended.update(rec_pos_np)
+
+    return {
+        "MAP@10": float(np.mean(AP10)),
+        "MAP@50": float(np.mean(AP50)),
+        "MAR@10": float(np.mean(AR10)),
+        "MAR@50": float(np.mean(AR50)),
+        "MRR@10": float(np.mean(MRR10)),
+        "MRR@50": float(np.mean(MRR50)),
+        "Coverage": float(len(all_recommended) / n_tracks),
+        "Diversity@10": float(np.mean(div10)),
+        "Diversity@50": float(np.mean(div50)),
+    }
+
+
+# =========================
+# USER-TO-TRACK (KNN)
+# =========================
+
+def evaluate_user_based_knn(user_liked_lists, embeddings_np, genre_matrix_np, k=10, model_type="audio"):
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    config = load_knn_config(model_type)
+
+    knn = NearestNeighbors(
+        n_neighbors=k,
+        metric=config.get("metric", "cosine"),
+        algorithm=config.get("algorithm", "auto")
+    )
+
+    knn.fit(embeddings_np)
+
+    genres = torch.from_numpy(genre_matrix_np).float().to(device)
+
+    AP10, AR10, MRR10 = [], [], []
+    AP50, AR50, MRR50 = [], [], []
+    div10, div50 = [], []
+
+    all_recommended = set()
+
+    n_tracks = embeddings_np.shape[0]
     inference_times = []
 
     for user in tqdm.tqdm(user_liked_lists):
-        user_emb = user['vector']
-        # --- ШАГ 4: Поиск рекомендаций (User Embedding vs All Tracks) ---
-        # Синхронизируем CUDA перед стартом, чтобы убедиться, что предыдущие операции завершены
-        if device.type == 'cuda':
-            torch.cuda.synchronize()
-        start_time = time.time()
-        sims = torch.mm(user_emb, embeddings.T)[0] # (N,)
-
-        favorite_poses = [id_to_pos[track_id] for track_id in user['liked_tracks']]
-        # Превращаем список позиций в тензор позиций
-        liked_poses_tensor = torch.tensor(favorite_poses, dtype=torch.long, device=device)
-
-        # Маскируем лайкнутые треки (ставим им очень низкий скор, чтобы они не попали в топ)
-        mask = torch.ones(n_tracks, device=device)
-        mask[liked_poses_tensor] = -1e9 
-        masked_sims = sims + mask
-
-        # Берем топ-K рекомендаций
-        rec_vals, rec_poses = torch.topk(masked_sims, k=k) # (K,)
-        # Синхронизируем CUDA после завершения всех вычислений
-        if device.type == 'cuda':
-            torch.cuda.synchronize()
-            
-        end_time = time.time()
         
-        # Записываем время
-        inference_times.append(end_time - start_time)
-        recommended_positions = rec_poses.cpu().numpy()    # Переносим на CPU для дальнейшей работы с pandas/sets
+        user_emb = user["vector"]
 
-        # A. Релевантность рекомендаций (rels)
-        rec_genres = genres[rec_poses]             # (K, M)
-        liked_genres = genres[liked_poses_tensor]  # (L, M)
-        
-        # Маска жанров пользователя: какие жанры есть хотя бы в одном лайке
-        user_genre_mask = liked_genres.any(dim=0)    # (M,) boolean
-        
-        # Проверяем пересечение жанров у рекомендованных треков с маской пользователя
-        # (K, M) * (1, M) -> (K, M). any(dim=1) -> (K,) boolean
-        relevances_bool = (rec_genres * user_genre_mask.unsqueeze(0)).any(dim=1)
-        rels = relevances_bool.int().cpu().numpy() # (K,) array of 0/1
-        
-        # B. Расчет m (сколько всего треков в базе релевантны пользователю?)
-        # Вместо цикла for j in range(n_tracks):
-        # Мы умножаем матрицу всех жанров (N, M) на вектор маски (M, 1)
-        # Результат (N, 1): для каждого трека сумма общих жанров с пользователем
-        overlaps_all = torch.mm(genres, user_genre_mask.float().unsqueeze(1))
-        
-        # Трек релевантен, если overlap > 0
-        is_relevant_global = (overlaps_all > 0).squeeze(1) # (N,) boolean
-        
-        # m = количество таких треков
-        m = is_relevant_global.sum().item()
+        start = time.time()
 
-        rec_embs_cpu = embeddings[recommended_positions].cpu().numpy()
+        dist, idx = knn.kneighbors(user_emb, n_neighbors=k)
 
-        AP50.append(average_precision(rels, m, 50))
-        AR50.append(average_recall(rels, m, 50))
-        MRR50.append(reciprocal_rank(rels))
-        diversity_scores50.append(diversity(rec_embs_cpu))
+        end = time.time()
+        inference_times.append(end - start)
+
+        rec_pos = idx[0]
+
+        liked_pos = torch.tensor(
+            [id_to_pos[x] for x in user["liked_tracks"]],
+            device=device
+        )
+
+        rec_genres = genres[rec_pos]
+        liked_genres = genres[liked_pos]
+
+        user_genre_mask = liked_genres.any(dim=0)
+
+        rels = (rec_genres * user_genre_mask.unsqueeze(0)).any(dim=1).int().cpu().numpy()
+
+        m = ((genres * user_genre_mask).sum(dim=1) > 0).sum().item()
+
+        rec_embs = embeddings_np[rec_pos]
 
         AP10.append(average_precision(rels[:10], m, 10))
         AR10.append(average_recall(rels[:10], m, 10))
         MRR10.append(reciprocal_rank(rels[:10]))
-        diversity_scores10.append(diversity(rec_embs_cpu[:10]))
 
-        # ИСПРАВЛЕНИЕ: Превращаем позиции обратно в ID треков
-        recommended_ids = [pos_to_id[pos] for pos in recommended_positions]
-        
-        all_recommended.update(recommended_ids)
+        AP50.append(average_precision(rels, m, 50))
+        AR50.append(average_recall(rels, m, 50))
+        MRR50.append(reciprocal_rank(rels))
+
+        div10.append(diversity(rec_embs[:10]))
+        div50.append(diversity(rec_embs))
+
+        all_recommended.update(rec_pos)
 
     return {
-        "MAP@50": float(np.mean(AP50)),
         "MAP@10": float(np.mean(AP10)),
-        "MAR@50": float(np.mean(AR50)),
+        "MAP@50": float(np.mean(AP50)),
         "MAR@10": float(np.mean(AR10)),
-        "MRR50": float(np.mean(MRR50)),
-        "MRR10": float(np.mean(MRR10)),
+        "MAR@50": float(np.mean(AR50)),
+        "MRR@10": float(np.mean(MRR10)),
+        "MRR@50": float(np.mean(MRR50)),
         "Coverage": float(len(all_recommended) / n_tracks),
-        "Mean Diversity 50": float(np.mean(diversity_scores50)),
-        "Mean Diversity 10": float(np.mean(diversity_scores10)),
-        "Mean inference time": float(np.mean(inference_times))
+        "Diversity@10": float(np.mean(div10)),
+        "Diversity@50": float(np.mean(div50)),
+        "Mean inference time": float(np.mean(inference_times)),
     }
-# Глобальный словарь для хранения всех результатов
+
+
+# =========================
+# METRICS STORAGE
+# =========================
+
 ALL_METRICS = {}
 
-def add_model_metrics(model_name, metrics_dict, filename='all_model_metrics.json'):
-    """
-    Добавляет метрики модели в глобальный словарь и сохраняет в JSON файл.
-    
-    model_name: str - имя модели (ключ в словаре)
-    metrics_dict: dict - словарь с метриками (например, {'MAP': 0.5, 'Recall': 0.6})
-    filename: str - имя файла для сохранения
-    """
-    global ALL_METRICS
-    
-    # Добавляем в глобальный словарь
-    ALL_METRICS[model_name] = metrics_dict
-    
-    # Сохраняем в файл (перезаписываем файл актуальным состоянием словаря)
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(ALL_METRICS, f, indent=4, ensure_ascii=False)
-        
-    print(f"Метрики для '{model_name}' добавлены и сохранены в {filename}")
-# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-# Объединим их в один словарь для удобства (или можно сохранять по отдельности)
-#    combined_metrics = {
-#        "User_to_Track": metrics_user,
-#        "Track_to_Track": metrics_track
-#    }
-# # !!! ВОТ ЭТА СТРОКА ДОБАВЛЯЕТ РЕЗУЛЬТАТ В ОБЩИЙ СЛОВАРЬ !!!
-# add_model_metrics(model_name, combined_metrics)
+def add_model_metrics(model_name, metrics_dict, filename="all_model_metrics.json"):
 
+    global ALL_METRICS
+    ALL_METRICS[model_name] = metrics_dict
+
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(ALL_METRICS, f, indent=4, ensure_ascii=False)
+
+    print(f"Saved metrics for {model_name}")
