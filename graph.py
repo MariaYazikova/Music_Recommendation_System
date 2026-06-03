@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch_geometric.nn import GCNConv 
 
-BASE_PATH = '/kaggle/input/datasets/daryashabarkina/dataset/'
+BASE_PATH = '/dataset/'
 
 train_url = f'{BASE_PATH}X_train.pkl'
 with open(train_url, 'rb') as a:
